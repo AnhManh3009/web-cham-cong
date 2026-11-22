@@ -589,7 +589,7 @@ export default function App() {
               style={{ width: 40, height: 40, borderRadius: 12, objectFit: 'cover', border: '2px solid var(--line)', padding: 0 }}
             />
             <h1 className="text-xl font-extrabold m-0" style={{ color: 'var(--brand)' }}>
-              Tức Tắc Tea
+              Chấm Công
             </h1>
           </div>
           <button className="chip" onClick={() => setPanel('set')} aria-label="Cài đặt">
