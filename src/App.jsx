@@ -1,13 +1,16 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 
+// Giữ nguyên key cũ để không mất dữ liệu đã chấm
 const KEY = 'tuctac_chamcong_v1';
 const DEF = { dayRate: 24000, nightRate: 34000 };
+
+// Ca làm nhanh: [nhãn, giờ vào, giờ ra]
 const PRESETS = [
+  ['7h30 - 12h30', '07:30', '12:30'],
   ['7h30 - 15h', '07:30', '15:00'],
   ['12h - 17h', '12:00', '17:00'],
-  ['17h - 22h', '17:00', '22:00'],
+  ['15h - 22h30', '15:00', '22:30'],
   ['22h - 3h', '22:00', '03:00'],
-  ['17h - 3h', '17:00', '03:00'],
 ];
 
 const num = (v) => {
@@ -24,21 +27,44 @@ const toMin = (t) => {
   const a = t.split(':').map(Number);
   return a[0] * 60 + a[1];
 };
-const ov = (a, b, c, d) => Math.max(0, Math.min(b, d) - Math.max(a, c));
 
-// Tách giờ ca ngày / ca khuya, xử lý cả ca qua 00:00
+// Quy tắc mới: xét theo giờ BẮT ĐẦU ca.
+// - Bắt đầu từ 22:00 trở đi  -> 100% ca khuya
+// - Bắt đầu trước 22:00      -> 100% ca ngày (kể cả giờ ra lố qua 22:00)
+// Nếu giờ ra <= giờ vào thì cộng thêm 24 giờ (ca qua 00:00 đêm).
 function calcShift(st, en) {
   if (!st || !en) return null;
   const s = toMin(st);
   let e = toMin(en);
   if (e <= s) e += 1440;
-  const D = [[450, 1320], [1890, 2760]];
-  const N = [[0, 450], [1320, 1890], [2760, 3330]];
-  const sum = (R) => R.reduce((t, r) => t + ov(s, e, r[0], r[1]), 0) / 60;
-  return { day: sum(D), night: sum(N) };
+  const hours = (e - s) / 60;
+  return s >= 1320 ? { day: 0, night: hours } : { day: hours, night: 0 };
 }
 
-const wage = (e) => e.dayH * e.dayRate + e.nightH * e.nightRate;
+// Tiền = (giờ ngày + OT ngày) x đơn giá ngày + (giờ khuya + OT đêm) x đơn giá khuya,
+// nhân hệ số ngày lễ (nếu có), rồi mới cộng thưởng / phụ cấp.
+function calcPay(dH, nH, oD, oN, rd, rn, holiday, mult, bonus) {
+  const k = holiday ? mult : 1;
+  return ((dH + oD) * rd + (nH + oN) * rn) * k + bonus;
+}
+
+// Chuẩn hóa bản ghi (bản ghi cũ chưa có OT / ngày lễ sẽ nhận giá trị mặc định an toàn)
+const norm = (e) => ({
+  ...e,
+  dayH: num(e.dayH),
+  nightH: num(e.nightH),
+  otDay: num(e.otDay),
+  otNight: num(e.otNight),
+  isHoliday: !!e.isHoliday,
+  holidayMultiplier: e.holidayMultiplier === 3 ? 3 : 2,
+  dayRate: e.dayRate || DEF.dayRate,
+  nightRate: e.nightRate || DEF.nightRate,
+  bonus: num(e.bonus),
+});
+
+const entryPay = (e) =>
+  calcPay(e.dayH, e.nightH, e.otDay, e.otNight, e.dayRate, e.nightRate, e.isHoliday, e.holidayMultiplier, e.bonus);
+const entryHours = (e) => e.dayH + e.nightH + e.otDay + e.otNight;
 
 const Ic = ({ d, s = 20 }) => (
   <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
@@ -57,12 +83,19 @@ const I = {
   trash: ['M3 6h18', 'M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6', 'M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2'],
   down: ['M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4', 'm7 10 5 5 5-5', 'M12 15V3'],
   up: ['M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4', 'm17 8-5-5-5 5', 'M12 3v12'],
+  check: ['M20 6 9 17l-5-5'],
 };
 
 function load() {
   try {
     const r = JSON.parse(localStorage.getItem(KEY) || 'null');
-    if (r && r.entries) return { settings: Object.assign({}, DEF, r.settings), entries: r.entries };
+    if (r && r.entries) {
+      const entries = {};
+      Object.keys(r.entries).forEach((k) => {
+        entries[k] = norm(r.entries[k]);
+      });
+      return { settings: Object.assign({}, DEF, r.settings), entries };
+    }
   } catch (e) {}
   return { settings: { ...DEF }, entries: {} };
 }
@@ -75,8 +108,11 @@ function Editor({ date, entry, settings, onSave, onDelete, onClose }) {
     nightH: entry && entry.nightH ? fh(entry.nightH) : '',
     start: entry ? entry.start || '' : '',
     end: entry ? entry.end || '' : '',
+    otDay: entry && entry.otDay ? fh(entry.otDay) : '',
+    otNight: entry && entry.otNight ? fh(entry.otNight) : '',
+    isHoliday: entry ? !!entry.isHoliday : false,
+    mult: entry && entry.holidayMultiplier === 3 ? 3 : 2,
     bonus: entry && entry.bonus ? String(entry.bonus) : '',
-    advance: entry && entry.advance ? String(entry.advance) : '',
     note: entry ? entry.note || '' : '',
   });
   const set = (k, v) => setF((o) => ({ ...o, [k]: v }));
@@ -89,22 +125,32 @@ function Editor({ date, entry, settings, onSave, onDelete, onClose }) {
       ...(c ? { dayH: c.day ? fh(c.day) : '', nightH: c.night ? fh(c.night) : '' } : {}),
     }));
   };
+  const toggleHoliday = () => setF((o) => ({ ...o, isHoliday: !o.isHoliday, mult: 2 }));
+
   const dH = num(f.dayH);
   const nH = num(f.nightH);
-  const w = dH * rates.d + nH * rates.n;
-  const total = w + num(f.bonus);
+  const oD = num(f.otDay);
+  const oN = num(f.otNight);
+  const bonus = Math.round(num(f.bonus));
+  const totalH = dH + nH + oD + oN;
+  const total = calcPay(dH, nH, oD, oN, rates.d, rates.n, f.isHoliday, f.mult, bonus);
   const [y, m, d] = date.split('-').map(Number);
   const wd = ['Chủ nhật', 'Thứ 2', 'Thứ 3', 'Thứ 4', 'Thứ 5', 'Thứ 6', 'Thứ 7'][new Date(y, m - 1, d).getDay()];
+
   const save = () =>
     onSave({
+      ...(entry || {}),
       dayH: r2(dH),
       nightH: r2(nH),
+      otDay: r2(oD),
+      otNight: r2(oN),
+      isHoliday: f.isHoliday,
+      holidayMultiplier: f.mult,
       dayRate: rates.d,
       nightRate: rates.n,
       start: f.start,
       end: f.end,
-      bonus: Math.round(num(f.bonus)),
-      advance: Math.round(num(f.advance)),
+      bonus: bonus,
       note: f.note.trim(),
     });
 
@@ -156,32 +202,80 @@ function Editor({ date, entry, settings, onSave, onDelete, onClose }) {
           </div>
         </div>
 
+        <span className="lbl">OT dọn vệ sinh / họp cửa hàng (số giờ)</span>
         <div className="grid grid-cols-2 gap-3 mb-4">
           <div>
-            <span className="lbl">Thưởng / Phụ cấp (+)</span>
-            <input inputMode="numeric" placeholder="0" value={f.bonus} onChange={(e) => set('bonus', e.target.value.replace(/[^\d]/g, ''))} />
+            <input inputMode="decimal" placeholder="OT ngày (7h–22h)" value={f.otDay} onChange={(e) => set('otDay', e.target.value)} />
+            <div style={{ fontSize: 11, color: 'var(--mute)', margin: '4px 2px 0' }}>Tính giá ca ngày</div>
           </div>
           <div>
-            <span className="lbl">Tạm ứng tiền mặt (-)</span>
-            <input inputMode="numeric" placeholder="0" value={f.advance} onChange={(e) => set('advance', e.target.value.replace(/[^\d]/g, ''))} />
+            <input inputMode="decimal" placeholder="OT đêm (từ 22h)" value={f.otNight} onChange={(e) => set('otNight', e.target.value)} />
+            <div style={{ fontSize: 11, color: 'var(--mute)', margin: '4px 2px 0' }}>Tính giá ca khuya</div>
           </div>
         </div>
+
+        <div className="card p-3 mb-4" style={{ background: 'var(--bg)' }}>
+          <button
+            type="button"
+            role="checkbox"
+            aria-checked={f.isHoliday}
+            onClick={toggleHoliday}
+            className="flex items-center gap-3 w-full"
+            style={{ minHeight: 44, textAlign: 'left' }}
+          >
+            <span
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: 8,
+                flexShrink: 0,
+                border: '2px solid ' + (f.isHoliday ? 'var(--brand)' : 'var(--line)'),
+                background: f.isHoliday ? 'var(--brand)' : 'var(--card)',
+                color: 'var(--brand-ink)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              {f.isHoliday && <Ic d={I.check} s={16} />}
+            </span>
+            <span style={{ fontWeight: 700 }}>Ngày lễ</span>
+            <span style={{ fontSize: 12, color: 'var(--mute)' }}>nhân hệ số toàn bộ giờ công</span>
+          </button>
+          {f.isHoliday && (
+            <div className="flex gap-2 mt-2">
+              {[2, 3].map((x) => (
+                <button
+                  key={x}
+                  className="chip flex-1"
+                  onClick={() => set('mult', x)}
+                  style={
+                    f.mult === x
+                      ? { background: 'var(--brand)', color: 'var(--brand-ink)', borderColor: 'var(--brand)', minHeight: 44, fontSize: 16 }
+                      : { minHeight: 44, fontSize: 16 }
+                  }
+                >
+                  x{x}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <span className="lbl">Thưởng / Phụ cấp (+)</span>
+        <input className="mb-4" inputMode="numeric" placeholder="0" value={f.bonus} onChange={(e) => set('bonus', e.target.value.replace(/[^\d]/g, ''))} />
 
         <span className="lbl">Ghi chú</span>
         <input className="mb-4" placeholder="Ví dụ: đổi ca, làm thêm…" value={f.note} onChange={(e) => set('note', e.target.value)} />
 
-        <div className="card p-4 mb-4 flex items-center justify-between" style={{ background: 'var(--day-bg)' }}>
-          <div>
-            <div style={{ fontSize: 12, color: 'var(--mute)' }}>
-              {fh(dH + nH)} giờ ({fh(dH)} ngày + {fh(nH)} khuya)
-            </div>
-            <div className="disp text-2xl font-extrabold" style={{ color: 'var(--brand)' }}>
-              {vnd(total)}
-            </div>
+        <div className="card p-4 mb-4" style={{ background: 'var(--day-bg)' }}>
+          <div style={{ fontSize: 12, color: 'var(--mute)' }}>
+            {fh(totalH)} giờ ({fh(dH + oD)} ngày + {fh(nH + oN)} khuya)
+            {f.isHoliday ? ' · Ngày lễ x' + f.mult : ''}
           </div>
-          {num(f.advance) > 0 && (
-            <div style={{ fontSize: 12, color: 'var(--danger)', fontWeight: 700 }}>Ứng −{vnd(num(f.advance))}</div>
-          )}
+          <div className="disp text-2xl font-extrabold" style={{ color: 'var(--brand)' }}>
+            {vnd(total)}
+          </div>
         </div>
 
         <div className="flex gap-3">
@@ -290,13 +384,14 @@ function TextModal({ title, text, editable, filename, mime, confirmLabel, onConf
   );
 }
 
-function Stat({ l, v, c }) {
+function Stat({ l, v, c, sub }) {
   return (
     <div>
       <div style={{ fontSize: 11, color: 'var(--mute)', fontWeight: 600 }}>{l}</div>
-      <div className="disp font-extrabold" style={{ fontSize: 17, color: c || 'var(--ink)', lineHeight: 1.2 }}>
+      <div className="disp font-extrabold" style={{ fontSize: 21, color: c || 'var(--ink)', lineHeight: 1.2 }}>
         {v}
       </div>
+      {sub && <div style={{ fontSize: 11, color: 'var(--mute)', marginTop: 2 }}>{sub}</div>}
     </div>
   );
 }
@@ -321,20 +416,27 @@ export default function App() {
   const offset = (new Date(y, m - 1, 1).getDay() + 6) % 7;
   const todayKey = dkey(now.getFullYear(), now.getMonth() + 1, now.getDate());
 
+  // Tổng kết tháng: giờ làm + OT cộng chung vào giờ ngày / giờ khuya.
+  // Giờ làm trong ngày lễ được tách riêng thành "giờ lễ" (số giờ thực làm, chưa nhân hệ số).
   const S = useMemo(() => {
     let dh = 0;
     let nh = 0;
+    let hol = 0;
     let earn = 0;
-    let adv = 0;
     Object.keys(data.entries).forEach((k) => {
       if (k.indexOf(pre) !== 0) return;
       const e = data.entries[k];
-      dh += e.dayH;
-      nh += e.nightH;
-      earn += wage(e) + (e.bonus || 0);
-      adv += e.advance || 0;
+      const dPart = e.dayH + e.otDay;
+      const nPart = e.nightH + e.otNight;
+      if (e.isHoliday) {
+        hol += dPart + nPart;
+      } else {
+        dh += dPart;
+        nh += nPart;
+      }
+      earn += entryPay(e);
     });
-    return { dh, nh, earn, adv };
+    return { dh, nh, hol, earn };
   }, [data, pre]);
 
   const move = (n) =>
@@ -355,8 +457,9 @@ export default function App() {
   const save = (k, e) => {
     setData((d) => {
       const en = { ...d.entries };
-      if (!e.dayH && !e.nightH && !e.bonus && !e.advance && !e.note) delete en[k];
-      else en[k] = e;
+      const empty = !e.dayH && !e.nightH && !e.otDay && !e.otNight && !e.bonus && !e.advance && !e.note;
+      if (empty) delete en[k];
+      else en[k] = norm(e);
       return { ...d, entries: en };
     });
     setSel(null);
@@ -376,7 +479,9 @@ export default function App() {
 
   const exportCSV = () => {
     const q = (s) => '"' + String(s).replace(/"/g, '""') + '"';
-    const rows = [['Ngày', 'Giờ ca ngày', 'Giờ ca khuya', 'Tổng giờ', 'Tiền mặt', 'Tạm ứng', 'Ghi chú'].join(',')];
+    const rows = [
+      ['Ngày', 'Giờ ca ngày', 'Giờ ca khuya', 'OT ngày', 'OT đêm', 'Tổng giờ', 'Hệ số ngày lễ', 'Tiền mặt', 'Ghi chú'].join(','),
+    ];
     Object.keys(data.entries)
       .filter((k) => k.indexOf(pre) === 0)
       .sort()
@@ -388,9 +493,11 @@ export default function App() {
             p[2] + '/' + p[1] + '/' + p[0],
             fh(e.dayH),
             fh(e.nightH),
-            fh(e.dayH + e.nightH),
-            Math.round(wage(e) + (e.bonus || 0)),
-            e.advance || 0,
+            fh(e.otDay),
+            fh(e.otNight),
+            fh(entryHours(e)),
+            e.isHoliday ? 'x' + e.holidayMultiplier : '',
+            Math.round(entryPay(e)),
             q(e.note || ''),
           ].join(',')
         );
@@ -407,7 +514,11 @@ export default function App() {
     try {
       const r = JSON.parse(v);
       if (!r || typeof r.entries !== 'object') throw new Error('invalid');
-      setData({ settings: Object.assign({}, DEF, r.settings), entries: r.entries });
+      const entries = {};
+      Object.keys(r.entries).forEach((k) => {
+        entries[k] = norm(r.entries[k]);
+      });
+      setData({ settings: Object.assign({}, DEF, r.settings), entries });
       setText(null);
       setPanel(null);
     } catch (e) {
@@ -421,24 +532,39 @@ export default function App() {
   for (let d = 1; d <= days; d++) {
     const k = dkey(y, m, d);
     const e = data.entries[k];
-    const h = e ? e.dayH + e.nightH : 0;
+    const h = e ? entryHours(e) : 0;
+    const has = e && (h > 0 || e.bonus > 0);
     cells.push(
-      <button
-        key={k}
-        className={'cell' + (e && (h > 0 || e.bonus || e.advance) ? ' has' : '') + (k === todayKey ? ' today' : '')}
-        onClick={() => setSel(k)}
-      >
+      <button key={k} className={'cell' + (has ? ' has' : '') + (k === todayKey ? ' today' : '')} onClick={() => setSel(k)}>
         <span className="n" style={k === todayKey ? { color: 'var(--today)' } : null}>
           {d}
         </span>
         {e && h > 0 && (
           <>
             <span style={{ fontWeight: 600 }}>{fh(h)}h</span>
-            <span style={{ color: 'var(--brand)', fontWeight: 700 }}>{sk(wage(e) + (e.bonus || 0))}</span>
+            <span style={{ color: 'var(--brand)', fontWeight: 700 }}>{sk(entryPay(e))}</span>
           </>
         )}
-        {e && h === 0 && (e.bonus || e.advance) ? <span style={{ color: 'var(--mute)' }}>•</span> : null}
-        {e && e.nightH > 0 && (
+        {e && h === 0 && e.bonus > 0 ? <span style={{ color: 'var(--mute)' }}>•</span> : null}
+        {e && e.isHoliday && (
+          <span
+            style={{
+              position: 'absolute',
+              top: 3,
+              left: 3,
+              background: 'var(--brand)',
+              color: 'var(--brand-ink)',
+              borderRadius: 6,
+              padding: '0 3px',
+              fontSize: 9,
+              fontWeight: 800,
+              lineHeight: '13px',
+            }}
+          >
+            x{e.holidayMultiplier}
+          </span>
+        )}
+        {e && e.nightH + e.otNight > 0 && (
           <span style={{ position: 'absolute', top: 3, right: 3, color: 'var(--night)' }}>
             <Ic d={I.moon} s={11} />
           </span>
@@ -447,14 +573,23 @@ export default function App() {
     );
   }
 
+  const hoursSub =
+    fh(S.dh) + ' giờ ngày + ' + fh(S.nh) + ' giờ khuya' + (S.hol > 0 ? ' + ' + fh(S.hol) + ' giờ lễ' : '');
+
   return (
     <div style={{ maxWidth: 520, margin: '0 auto' }}>
       <div className="hdr">
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
-            <img src="/icon-192.png" alt="" width="40" height="40" style={{ width: 40, height: 40, borderRadius: 12, objectFit: 'cover', border: '2px solid var(--line)', padding: 0 }} />
+            <img
+              src="/icon-192.png"
+              alt=""
+              width="40"
+              height="40"
+              style={{ width: 40, height: 40, borderRadius: 12, objectFit: 'cover', border: '2px solid var(--line)', padding: 0 }}
+            />
             <h1 className="text-xl font-extrabold m-0" style={{ color: 'var(--brand)' }}>
-              Chấm công nè alo
+              Tức Tắc Tea
             </h1>
           </div>
           <button className="chip" onClick={() => setPanel('set')} aria-label="Cài đặt">
@@ -462,7 +597,7 @@ export default function App() {
           </button>
         </div>
         <div className="card p-3">
-          <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center justify-between mb-3">
             <button className="chip" onClick={() => move(-1)} aria-label="Tháng trước">
               <Ic d={I.prev} s={18} />
             </button>
@@ -473,16 +608,13 @@ export default function App() {
               <Ic d={I.next} s={18} />
             </button>
           </div>
-          <div className="grid grid-cols-2 gap-x-3 gap-y-2">
-            <div>
-              <Stat l="Tổng số tiếng" v={fh(S.dh + S.nh) + ' giờ'} />
-              <div style={{ fontSize: 11, color: 'var(--mute)' }}>
-                {fh(S.dh)} giờ ngày + {fh(S.nh)} giờ khuya
-              </div>
+          <div className="grid grid-cols-2 items-start">
+            <div style={{ paddingRight: 12 }}>
+              <Stat l="Tổng số tiếng" v={fh(S.dh + S.nh + S.hol) + ' giờ'} sub={hoursSub} />
             </div>
-            <Stat l="Tổng tiền kiếm được" v={vnd(S.earn)} c="var(--brand)" />
-            <Stat l="Đã tạm ứng" v={vnd(S.adv)} c="var(--danger)" />
-            <Stat l="Thực nhận còn lại" v={vnd(S.earn - S.adv)} c="var(--tea)" />
+            <div style={{ paddingLeft: 12, borderLeft: '1.5px solid var(--line)' }}>
+              <Stat l="Tổng tiền kiếm được" v={vnd(S.earn)} c="var(--brand)" />
+            </div>
           </div>
         </div>
       </div>
@@ -536,7 +668,7 @@ export default function App() {
               </div>
             </div>
             <p style={{ fontSize: 12, color: 'var(--mute)', margin: '0 2px 16px' }}>
-              Ca ngày 07:30–22:00, ca khuya 22:00–07:30. Đơn giá mới chỉ áp dụng cho ngày chấm công mới; các ngày cũ giữ nguyên đơn giá đã lưu.
+              Ca khuya: ca bắt đầu từ 22:00 trở đi. Ca ngày: ca bắt đầu trước 22:00 (tính 100% giá ca ngày kể cả khi giờ ra lố qua 22:00). Đơn giá mới chỉ áp dụng cho ngày chấm công mới; các ngày cũ giữ nguyên đơn giá đã lưu.
             </p>
             <div className="flex flex-col gap-2">
               <button className="btn btn-s flex items-center justify-center gap-2" onClick={exportCSV}>
